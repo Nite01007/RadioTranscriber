@@ -12,6 +12,7 @@ import scipy.signal as signal
 import os
 import gc
 import re
+from collections import Counter
 import webrtcvad
 
 from config import USERNAME, PASSWORD, FEED_NUMBER, FEED_DESCRIPTION
@@ -20,31 +21,27 @@ from config import USERNAME, PASSWORD, FEED_NUMBER, FEED_DESCRIPTION
 STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
 MODEL_SIZE = "large-v3"
 SAMPLE_RATE = 16000
-CHUNK_BYTES = 8192        # ~0.25s chunks (must be multiple of VAD frame)
+CHUNK_BYTES = 8192
 MIN_SPEECH_SECONDS = 1.0
-SILENCE_LIMIT = 2.0       # Hangover seconds
+SILENCE_LIMIT = 2.0
 IDLE_THRESHOLD_SECONDS = 600
 NORMALIZATION_PERCENTILE = 95
-GC_INTERVAL = 100  # GC every 100 chunks (~25s)
-NO_SPEECH_THRESHOLD = 0.8  # Discard if no_speech_prob > this
+GC_INTERVAL = 100
+NO_SPEECH_THRESHOLD = 0.8
 
-# Dynamic log file with description and daily rollover
 BASE_LOG_FILENAME = f"transcription_{FEED_DESCRIPTION}"
 LOG_FILE = f"{BASE_LOG_FILENAME}_{datetime.date.today()}.log"
 CURRENT_LOG_DATE = datetime.date.today()
 
-# Touch log file at startup if needed
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, 'a').close()
 
-# High-pass filter: 100 Hz, SOS format for stateful filtering
 sos = signal.butter(5, 100 / (SAMPLE_RATE / 2), btype='high', output='sos')
-filter_state = np.zeros((sos.shape[0], 2))  # Initial filter state
+filter_state = np.zeros((sos.shape[0], 2))
 
-# WebRTC VAD setup (aggressiveness 3 for noisy radio)
-vad = webrtcvad.Vad(3)  # 0-3: 3 is most aggressive noise rejection
-VAD_FRAME_MS = 30  # VAD frame size (10/20/30 ms); use 30 for noise
-VAD_FRAME_BYTES = int(SAMPLE_RATE * VAD_FRAME_MS / 1000 * 2)  # PCM 16-bit
+vad = webrtcvad.Vad(3)
+VAD_FRAME_MS = 30
+VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)  # int16 bytes
 
 INITIAL_PROMPT = (
     "Verbatim police, fire, EMS radio dispatch in English. Transcribe exactly as spoken: no paraphrasing, expansions, interpretations. "
@@ -52,6 +49,7 @@ INITIAL_PROMPT = (
     "'Station 52' not 'patient 52'. Squad 1 not squadron. Unit IDs: 52XX## (A Ambulance, E Engine, L Ladder, B Police, BS Sergeant, BL Lieutenant; e.g., 52A1, 52E1, 52B10). "
     "Shortened: 'A1', 'E1', 'Bravo 6', 'Engine 1'. Transcribe literally. Status: received, responding, en route, on scene, clear, in service, 10-4, copy. "
     "Transports: Baystate, Wing, Cooley. Addresses: street/numbers. Plates: phonetic (e.g., '1 Alpha Bravo Charlie 23'). Phonetic alphabet: NATO. AMR ambulance. "
+    "Unit '52A2' is often spoken as 'five two eight two' or '52 82' — transcribe as '52A2'. "
     "Ignore non-speech, alert tones as '[beeps]', not 'bee', 'beep', or sustained letters. Speech: clipped, rapid, professional with static. No fillers, narration, music."
 )
 
@@ -131,14 +129,15 @@ def transcriber_worker(model, device):
             transcribe_time = time.time() - transcribe_start
             print(f"   Done in {transcribe_time:.1f}s")
 
-            # No-speech prob filter (discard high-prob non-speech)
+            # No-speech prob filter
             if result.get('no_speech_prob', 0) > NO_SPEECH_THRESHOLD:
                 print(f"   (Discarded non-speech segment: prob {result['no_speech_prob']:.2f})")
                 transcription_queue.task_done()
                 continue
 
-            # Post-processing for beep hallucinations
             original_text = text
+
+            # Beep hallucination replacement
             if duration < 10.0:
                 beep_patterns = [
                     "BEEE", "BEEEE", "EEEE", "BEEP", "BEEEP", 
@@ -149,18 +148,43 @@ def transcriber_worker(model, device):
                 upper_text = text.upper()
                 if any(pattern in upper_text for pattern in beep_patterns) and len(text) > 10:
                     text = "[beeps]"
-                    print(f"   (Replaced alert tone hallucination: {original_text} → [beeps])")
+                    print(f"   (Replaced alert tone: {original_text} → [beeps])")
 
-            # Regex for long single-char runs (block as [noise])
+            # Long single-char run → [noise]
             if re.search(r'([A-Z])\1{10,}', text.upper()):
                 text = "[noise]"
-                print(f"   (Replaced long char run hallucination: {original_text} → [noise])")
+                print(f"   (Replaced noise run: {original_text} → [noise])")
 
+            # De-duplicate repeated unit calls
+            words = text.split()
+            if len(words) > 3:
+                common = Counter(words).most_common(1)
+                if common and len(common[0][0]) <= 10 and common[0][1] > len(words) // 2:
+                    text = common[0][0]
+                    print(f"   (De-duplicated repetition: {original_text} → {text})")
+
+            # Map spoken numbers to letter units (your system)
+            unit_map = {
+                "eight two": "A2",
+                "8 2": "A2",
+                "82": "A2",
+                "eight-two": "A2",
+                "5 2 8 2": "52A2",
+                "five two eight two": "52A2",
+                "52 82": "52A2",
+                "five-two-eight-two": "52A2"
+            }
             lower_text = text.lower()
+            for spoken, letter in unit_map.items():
+                if spoken in lower_text:
+                    text = re.sub(re.escape(spoken), letter, text, flags=re.IGNORECASE)
+                    print(f"   (Mapped unit: {original_text} → {text})")
+
+            lower_text = text.lower()  # Refresh
             blocked = False
             for phrase in FULL_BLOCK_PHRASES:
                 if phrase.lower() in lower_text:
-                    print(f"   (Blocked full hallucination containing '{phrase}': {text})")
+                    print(f"   (Blocked hallucination containing '{phrase}': {text})")
                     blocked = True
                     break
             if blocked:
@@ -171,13 +195,10 @@ def transcriber_worker(model, device):
                 idx = lower_text.find(phrase.lower())
                 if idx != -1:
                     text = text[:idx].strip()
-                    print(f"   (Truncated at hallucinated phrase '{phrase}': {original_text})")
+                    print(f"   (Truncated hallucinated phrase '{phrase}': {original_text})")
                     break
 
-            # Regex for unit ID normalization (remove hyphens)
-            text = re.sub(r'(\d)-(\d)', r'\1\2', text)  # e.g., 5-2 → 52
-
-            # Regex capitalization for clarity (Dispatch, Station 52, hospitals, units)
+            # Capitalization for clarity
             keywords = r'(dispatch|central|station 52|baystate|wing|cooley|amr|bravo \d+|engine \d+|ladder \d+|a\d+|e\d+|b\d+|bs\d+|bl\d+)'
             text = re.sub(keywords, lambda m: m.group(0).title(), text, flags=re.I)
 
@@ -238,10 +259,11 @@ def process_audio():
             audio_chunk, filter_state = signal.sosfilt(sos, audio_chunk, zi=filter_state)
             audio_chunk = audio_chunk.astype(np.float32)
 
-            # WebRTC VAD instead of energy
+            # WebRTC VAD
+            audio_int16 = (audio_chunk * 32767).astype(np.int16)
             is_speech = False
-            for i in range(0, len(audio_chunk), VAD_FRAME_BYTES // 2):  # Process in 30ms frames
-                frame = (audio_chunk[i:i + VAD_FRAME_BYTES // 2] * 32767).astype(np.int16).tobytes()
+            for i in range(0, len(audio_int16), VAD_FRAME_BYTES // 2):
+                frame = audio_int16[i:i + VAD_FRAME_BYTES // 2].tobytes()
                 if len(frame) == VAD_FRAME_BYTES:
                     if vad.is_speech(frame, SAMPLE_RATE):
                         is_speech = True
