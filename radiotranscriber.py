@@ -1,3 +1,4 @@
+# https://github.com/Nite01007/RadioTranscriber
 import subprocess
 import numpy as np
 import whisper
@@ -22,12 +23,12 @@ STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}
 MODEL_SIZE = "large-v3"
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
-MIN_SPEECH_SECONDS = 1.0
+MIN_SPEECH_SECONDS = 2.0
 SILENCE_LIMIT = 2.0
 IDLE_THRESHOLD_SECONDS = 600
 NORMALIZATION_PERCENTILE = 95
 GC_INTERVAL = 100
-NO_SPEECH_THRESHOLD = 0.8
+NO_SPEECH_THRESHOLD = 0.75
 
 BASE_LOG_FILENAME = f"transcription_{FEED_DESCRIPTION}"
 LOG_FILE = f"{BASE_LOG_FILENAME}_{datetime.date.today()}.log"
@@ -41,16 +42,19 @@ filter_state = np.zeros((sos.shape[0], 2))
 
 vad = webrtcvad.Vad(3)
 VAD_FRAME_MS = 30
-VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)  # int16 bytes
+VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
 
 INITIAL_PROMPT = (
-    "Verbatim police, fire, EMS radio dispatch in English. Transcribe exactly as spoken: no paraphrasing, expansions, interpretations. "
-    "No credits, captions like 'Transcription by', 'ESO', 'amara.org', 'Rev'. Speaker then recipient ID. Identifiers: Dispatch, Central, Station 52, units. "
-    "'Station 52' not 'patient 52'. Squad 1 not squadron. Unit IDs: 52XX## (A Ambulance, E Engine, L Ladder, B Police, BS Sergeant, BL Lieutenant; e.g., 52A1, 52E1, 52B10). "
-    "Shortened: 'A1', 'E1', 'Bravo 6', 'Engine 1'. Transcribe literally. Status: received, responding, en route, on scene, clear, in service, 10-4, copy. "
-    "Transports: Baystate, Wing, Cooley. Addresses: street/numbers. Plates: phonetic (e.g., '1 Alpha Bravo Charlie 23'). Phonetic alphabet: NATO. AMR ambulance. "
-    "Unit '52A2' is often spoken as 'five two eight two' or '52 82' — transcribe as '52A2'. "
-    "Ignore non-speech, alert tones as '[beeps]', not 'bee', 'beep', or sustained letters. Speech: clipped, rapid, professional with static. No fillers, narration, music."
+    "Transcribe verbatim police, fire, EMS radio dispatch in English. Use exact words spoken, including speaker and recipient IDs first. "
+    "Identifiers: Dispatch, Central, Station 52, units. Hear 'station 52' as 'Station 52'. Use 'Squad 1' for squad references. "
+    "Unit IDs: 52XX## where X is A for Ambulance, E for Engine, L for Ladder, B for Police, BS for Sergeant, BL for Lieutenant; examples: 52A1, 52E1, 52B10. "
+    "Short forms: A1, E1, Bravo 6, Engine 1. "
+    "Status terms: received, responding, en route, on scene, clear, in service, 10-4, copy. "
+    "Transports: Baystate, Wing, Cooley. Addresses: street names and numbers. "
+    "Plates: phonetic like '1 Alpha Bravo Charlie 23', using NATO alphabet. AMR for ambulance. "
+    "For units 52A1/52A2, hear 'five two eight one/two' or '52 81/82' as 52A1/52A2. "
+    "Hear 'eight' as 'A' in unit IDs like 52A1 for Ambulance. "
+    "Represent alert tones as '[beeps]'. Speech is clipped, rapid, professional with static."
 )
 
 FULL_BLOCK_PHRASES = [
@@ -68,7 +72,9 @@ CUTOFF_PHRASES = [
     "Thanks for watching",
     "Thank you for your patience",
     "Stay tuned",
-    "Commercial break"
+    "Commercial break",
+    "you're under arrest", 
+    "I'll narrate everything"
 ]
 
 transcription_queue = queue.Queue()
@@ -84,6 +90,112 @@ print(f"Streaming {FEED_DESCRIPTION} feed ({FEED_NUMBER}) from: {redacted_url}")
 print("   Press 'Q' to quit cleanly")
 
 last_activity_time = time.time()
+
+# --- BEGIN: Whisper beam-search debug instrumentation (with fixed tokenizer) ---
+import os
+import time
+
+WHISPER_DEBUG = os.getenv("WHISPER_DEBUG", "0") == "1"
+
+if WHISPER_DEBUG:
+    try:
+        from whisper.decoding import BeamSearchDecoder
+
+        _ORIG_UPDATE = BeamSearchDecoder.update
+        _ORIG_FINALIZE = BeamSearchDecoder.finalize
+
+        def _format_tokens(token_list):
+            if len(token_list) <= 12:
+                return token_list
+            return token_list[:3] + ["…"] + token_list[-8:]
+
+        def _decode_tokens(tokenizer, token_list):
+            try:
+                return tokenizer.decode(token_list)
+            except Exception:
+                return "<decode-error>"
+
+        def _get_tokenizer(self):
+            """Robust tokenizer retrieval across Whisper versions."""
+            tokenizer = None
+            if hasattr(self, "inference") and self.inference is not None:
+                tokenizer = getattr(self.inference, "tokenizer", None)
+            if tokenizer is None and hasattr(self, "model"):
+                tokenizer = getattr(self.model, "tokenizer", None)
+            if tokenizer is None:
+                global model
+                tokenizer = getattr(model, "tokenizer", None)
+            return tokenizer
+
+        def _debug_update(self, tokens, logits, sum_logprobs):
+            t0 = time.time()
+            next_tokens, completed = _ORIG_UPDATE(self, tokens, logits, sum_logprobs)
+            dt_ms = int((time.time() - t0) * 1000)
+
+            try:
+                n_total = next_tokens.shape[0]
+                beam_size = self.beam_size
+                n_audio = n_total // beam_size
+
+                tokenizer = _get_tokenizer(self)
+
+                for i in range(n_audio):
+                    print(f"[whisper-debug] audio={i} step_ms={dt_ms} beams={beam_size}")
+                    for j in range(beam_size):
+                        idx = i * beam_size + j
+                        seq = next_tokens[idx].tolist()
+
+                        score = float(sum_logprobs[idx].item() if hasattr(sum_logprobs[idx], "item") else sum_logprobs[idx])
+
+                        decoded = _decode_tokens(tokenizer, seq) if tokenizer else "<no-tokenizer>"
+
+                        print(f"  ├─ beam {j}: score={score:+.3f}")
+                        print(f"      text=\"{decoded}\"")
+                        print(f"      tokens={_format_tokens(seq)}")
+
+                    # Finished sequences
+                    finished_for_audio = (self.finished_sequences or [{}])[i] if self.finished_sequences is not None else {}
+                    if finished_for_audio:
+                        top_finished = sorted(finished_for_audio.items(), key=lambda kv: kv[1], reverse=True)[:min(beam_size, 3)]
+                        print("  └─ finished (top):")
+                        for k, (seq_tuple, s) in enumerate(top_finished):
+                            decoded_fin = _decode_tokens(tokenizer, list(seq_tuple)) if tokenizer else "<no-tokenizer>"
+                            print(f"     [{k}] score={s:+.3f}")
+                            print(f"         text=\"{decoded_fin}\"")
+                            print(f"         tokens={_format_tokens(list(seq_tuple))}")
+
+            except Exception as e:
+                print(f"[whisper-debug] logging error in update: {e}")
+
+            return next_tokens, completed
+
+        def _debug_finalize(self, preceding_tokens, sum_logprobs):
+            try:
+                tokens_groups, scores_groups = _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
+                tokenizer = _get_tokenizer(self)
+
+                for i, (tok_group, score_group) in enumerate(zip(tokens_groups, scores_groups)):
+                    print(f"[whisper-debug] FINAL audio={i} candidates={len(tok_group)}")
+                    pairs = sorted(zip(tok_group, score_group), key=lambda kv: kv[1], reverse=True)
+                    for rank, (seq_tensor, score) in enumerate(pairs[:min(len(pairs), 5)]):
+                        seq = seq_tensor.tolist()
+                        decoded = _decode_tokens(tokenizer, seq) if tokenizer else "<no-tokenizer>"
+                        print(f"  #{rank} score={score:+.3f}")
+                        print(f"     text=\"{decoded}\"")
+                        print(f"     tokens={_format_tokens(seq)}")
+            except Exception as e:
+                print(f"[whisper-debug] logging error in finalize: {e}")
+                return _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
+
+            return _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
+
+        BeamSearchDecoder.update = _debug_update
+        BeamSearchDecoder.finalize = _debug_finalize
+
+        print("[whisper-debug] Beam search instrumentation active (WHISPER_DEBUG=1)")
+    except Exception as _e:
+        print(f"[whisper-debug] could not activate instrumentation: {_e}")
+# --- END: Whisper beam-search debug instrumentation ---
 
 def get_ffmpeg_stream(url):
     command = [
@@ -129,13 +241,13 @@ def transcriber_worker(model, device):
             transcribe_time = time.time() - transcribe_start
             print(f"   Done in {transcribe_time:.1f}s")
 
+            original_text = text
+
             # No-speech prob filter
             if result.get('no_speech_prob', 0) > NO_SPEECH_THRESHOLD:
                 print(f"   (Discarded non-speech segment: prob {result['no_speech_prob']:.2f})")
                 transcription_queue.task_done()
                 continue
-
-            original_text = text
 
             # Beep hallucination replacement
             if duration < 10.0:
@@ -163,8 +275,18 @@ def transcriber_worker(model, device):
                     text = common[0][0]
                     print(f"   (De-duplicated repetition: {original_text} → {text})")
 
-            # Map spoken numbers to letter units (your system)
+            # Map spoken numbers to letter units
             unit_map = {
+                "eight one": "A1",
+                "8 1": "A1",
+                "81": "A1",
+                "eight-one": "A1",
+                "5 2 8 1": "52A1",
+                "five two eight one": "52A1",
+                "52 81": "52A1",
+                "five-two-eight-one": "52A1",
+                "5-2-8-1": "52A1",
+                "52-81": "52A1",
                 "eight two": "A2",
                 "8 2": "A2",
                 "82": "A2",
@@ -172,7 +294,9 @@ def transcriber_worker(model, device):
                 "5 2 8 2": "52A2",
                 "five two eight two": "52A2",
                 "52 82": "52A2",
-                "five-two-eight-two": "52A2"
+                "five-two-eight-two": "52A2",
+                "5-2-8-2": "52A2",
+                "52-82": "52A2"
             }
             lower_text = text.lower()
             for spoken, letter in unit_map.items():
@@ -180,7 +304,20 @@ def transcriber_worker(model, device):
                     text = re.sub(re.escape(spoken), letter, text, flags=re.IGNORECASE)
                     print(f"   (Mapped unit: {original_text} → {text})")
 
-            lower_text = text.lower()  # Refresh
+            # Normalize hyphens in unit IDs (e.g., 5-2-A-1 → 52A1)
+            # Targets 52-prefixed units with letters (A,E,L,B,BS,BL) + digits
+            def normalize_unit(match):
+                prefix = '52'
+                letter = match.group(1).upper()
+                num = match.group(2)
+                return f"{prefix}{letter}{num}"
+            
+            unit_pattern = r'\b5-?2-?([A-ELB]|BS|BL)-?(\d+)\b'
+            text = re.sub(unit_pattern, normalize_unit, text, flags=re.IGNORECASE)
+            if text != original_text:  # Only log if changed
+                print(f"   (Normalized units: {original_text} → {text})")
+
+            lower_text = text.lower()
             blocked = False
             for phrase in FULL_BLOCK_PHRASES:
                 if phrase.lower() in lower_text:
