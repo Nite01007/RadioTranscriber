@@ -45,16 +45,14 @@ VAD_FRAME_MS = 30
 VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
 
 INITIAL_PROMPT = (
-    "Transcribe verbatim police, fire, EMS radio dispatch in English. Use exact words spoken, including speaker and recipient IDs first. "
-    "Identifiers: Dispatch, Central, Station 52, units. Hear 'station 52' as 'Station 52'. Use 'Squad 1' for squad references. "
-    "Unit IDs: 52XX## where X is A for Ambulance, E for Engine, L for Ladder, B for Police, BS for Sergeant, BL for Lieutenant; examples: 52A1, 52E1, 52B10. "
-    "Short forms: A1, E1, Bravo 6, Engine 1. "
-    "Status terms: received, responding, en route, on scene, clear, in service, 10-4, copy. "
-    "Transports: Baystate, Wing, Cooley. Addresses: street names and numbers. "
-    "Plates: phonetic like '1 Alpha Bravo Charlie 23', using NATO alphabet. AMR for ambulance. "
-    "For units 52A1/52A2, hear 'five two eight one/two' or '52 81/82' as 52A1/52A2. "
-    "Hear 'eight' as 'A' in unit IDs like 52A1 for Ambulance. "
-    "Represent alert tones as '[beeps]'. Speech is clipped, rapid, professional with static."
+    "Transcript of Belchertown, MA (Station 52) public safety radio. "
+    "Agencies: Police (Bravo units), Fire, EMS. "
+    "Units: 52A1, 52A2, 52E1, 52L1, Brush 4, Bravo 6, Bravo 9, Bravo 13. "
+    "Note: 52A1 is 'Ambulance 1', 52E1 is 'Engine 1'. "
+    "Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. "
+    "Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. "
+    "Phrases: 'In quarters', 'On scene', 'Clear', 'Received', 'Responding', 'Central'. "
+    "52A1 responding to Daniel Shays. 52A2 transporting to Wing."
 )
 
 FULL_BLOCK_PHRASES = [
