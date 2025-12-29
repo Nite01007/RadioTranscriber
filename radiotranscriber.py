@@ -45,14 +45,7 @@ VAD_FRAME_MS = 30
 VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
 
 INITIAL_PROMPT = (
-    "Transcript of Belchertown, MA (Station 52) public safety radio. "
-    "Agencies: Police (Bravo units), Fire, EMS. "
-    "Units: 52A1, 52A2, 52E1, 52L1, Brush 4, Bravo 6, Bravo 9, Bravo 13. "
-    "Note: 52A1 is 'Ambulance 1', 52E1 is 'Engine 1'. "
-    "Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. "
-    "Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. "
-    "Phrases: 'In quarters', 'On scene', 'Clear', 'Received', 'Responding', 'Central'. "
-    "52A1 responding to Daniel Shays. 52A2 transporting to Wing."
+    "Transcript of Belchertown MA Station 52 public safety radio. Agencies: Police (Bravo units), Fire, EMS. Units: 52A1 52A2 52E1 52L1 Brush 4 Bravo 6 Bravo 9 Bravo 13 A1 Squad 1. Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. Common phrases: in quarters, on scene, clear, received, responding, central."
 )
 
 FULL_BLOCK_PHRASES = [
