@@ -63,9 +63,9 @@ A real-time transcription tool for public safety radio feeds (e.g., Broadcastify
     - This prevents accidentally committing your Broadcastify username/password or log files
 
 7. Run the transcriber:
-   ```.gitignore
-      config.yaml
-      *.log
+   ```bash
+      python radiotranscriber.py
+   ```
 
 ## Output
 
