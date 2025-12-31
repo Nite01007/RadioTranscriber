@@ -27,18 +27,12 @@ tuning:
 
 post_generation_cleanup:
   full_block_phrases:                 # Block entire transcript if contains any; common hallucinations
-    - "Transcription by"
     - "CastingWords"
     - "ESO"
-    - "Translation by"
-    - "Captions by"
     - "Rev.com"
     - "Rev"
-    - "Subtitle"
-    - "Subtitles"
     - "amara.org"
     - "amara"
-    - "subtitles by the amara.org community"
     - "ESA, Inc."
     - "U.S. Department of"
     - "Transcripts translated by"
@@ -55,6 +49,12 @@ post_generation_cleanup:
     - "Commercial break"
     - "you're under arrest"
     - "I'll narrate everything"
+    - "Transcription by"
+    - "Translation by"
+    - "Captions by"
+    - "Subtitle"
+    - "Subtitles"
+
 
   unit_mapping:                       # Map spoken unit phrases to standard IDs
     "eight one": "A1"
