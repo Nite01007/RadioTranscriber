@@ -15,58 +15,58 @@ import gc
 import re
 from collections import Counter
 import webrtcvad
+import yaml
 
-from config import USERNAME, PASSWORD, FEED_NUMBER, FEED_DESCRIPTION
+# Load configuration
+with open("config.yaml", "r", encoding="utf-8") as f:
+    config = yaml.safe_load(f)
+
+# Extract config values
+USERNAME = config["credentials"]["username"]
+PASSWORD = config["credentials"]["password"]
+FEED_NUMBER = config["feed_specific"]["feed_number"]
+FEED_DESCRIPTION = config["feed_specific"]["description"]
+OUTPUT_FOLDER = config["feed_specific"]["output_folder"]
+
+VAD_AGGRESSIVENESS = config["vad_and_silence"]["vad_aggressiveness"]
+MIN_SPEECH_SECONDS = config["vad_and_silence"]["min_speech_seconds"]
+SILENCE_LIMIT = config["vad_and_silence"]["silence_limit"]
+
+MODEL_SIZE = config["tuning"]["model_size"]
+LANGUAGE = config["tuning"]["language"]
+INITIAL_PROMPT = config["tuning"]["initial_prompt"]
+BEAM_SIZE = config["tuning"]["beam_size"]
+BEST_OF = config["tuning"]["best_of"]
+NO_SPEECH_THRESHOLD = config["tuning"]["no_speech_threshold"]
+NORMALIZATION_PERCENTILE = config["tuning"]["normalization"]
+
+FULL_BLOCK_PHRASES = config["post_generation_cleanup"]["full_block_phrases"]
+CUTOFF_PHRASES = config["post_generation_cleanup"]["cutoff_phrases"]
+UNIT_MAPPING = config["post_generation_cleanup"]["unit_mapping"]
+UNIT_PATTERN = config["post_generation_cleanup"]["unit_normalization"]["pattern"]
+UNIT_PREFIX = config["post_generation_cleanup"]["unit_normalization"]["prefix"]
 
 # --- SETTINGS ---
 STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
-MODEL_SIZE = "large-v3"
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
-MIN_SPEECH_SECONDS = 2.0
-SILENCE_LIMIT = 2.0
 IDLE_THRESHOLD_SECONDS = 600
-NORMALIZATION_PERCENTILE = 95
 GC_INTERVAL = 100
-NO_SPEECH_THRESHOLD = 0.75
 
 BASE_LOG_FILENAME = f"transcription_{FEED_DESCRIPTION}"
-LOG_FILE = f"{BASE_LOG_FILENAME}_{datetime.date.today()}.log"
+LOG_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{datetime.date.today()}.log")
 CURRENT_LOG_DATE = datetime.date.today()
 
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, 'a').close()
 
 sos = signal.butter(5, 100 / (SAMPLE_RATE / 2), btype='high', output='sos')
 filter_state = np.zeros((sos.shape[0], 2))
 
-vad = webrtcvad.Vad(3)
+vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
 VAD_FRAME_MS = 30
 VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
-
-INITIAL_PROMPT = (
-    "Transcript of Belchertown MA Station 52 public safety radio. Agencies: Police (Bravo units), Fire, EMS. Units: 52A1 52A2 52E1 52L1 Brush 4 Bravo 6 Bravo 9 Bravo 13 A1 Squad 1. Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. Common phrases: in quarters, on scene, clear, received, responding, central."
-)
-
-FULL_BLOCK_PHRASES = [
-    "Transcription by", "CastingWords", "ESO", "Translation by",
-    "Captions by", "Rev.com", "Rev", "Subtitle", "Subtitles",
-    "amara.org", "amara", "subtitles by the amara.org community",
-    "ESA, Inc.", "U.S. Department of", "Transcripts translated by",
-    "Transcription Outsourcing", "Transcription Outsourcing, Inc"
-]
-
-CUTOFF_PHRASES = [
-    "We'll be right back",
-    "We will be right back",
-    "Thank you for watching",
-    "Thanks for watching",
-    "Thank you for your patience",
-    "Stay tuned",
-    "Commercial break",
-    "you're under arrest", 
-    "I'll narrate everything"
-]
 
 transcription_queue = queue.Queue()
 
@@ -83,9 +83,6 @@ print("   Press 'Q' to quit cleanly")
 last_activity_time = time.time()
 
 # --- BEGIN: Whisper beam-search debug instrumentation (with fixed tokenizer) ---
-import os
-import time
-
 WHISPER_DEBUG = os.getenv("WHISPER_DEBUG", "0") == "1"
 
 if WHISPER_DEBUG:
@@ -217,13 +214,13 @@ def transcriber_worker(model, device):
             
             result = model.transcribe(
                 audio_data,
-                language="en",
+                language=LANGUAGE,
                 fp16=(device == "cuda"),
                 initial_prompt=INITIAL_PROMPT,
                 condition_on_previous_text=False,
                 temperature=0.0,
-                beam_size=5,
-                best_of=5,
+                beam_size=BEAM_SIZE,
+                best_of=BEST_OF,
                 patience=1.5,
                 suppress_blank=True
             )
@@ -267,30 +264,8 @@ def transcriber_worker(model, device):
                     print(f"   (De-duplicated repetition: {original_text} → {text})")
 
             # Map spoken numbers to letter units
-            unit_map = {
-                "eight one": "A1",
-                "8 1": "A1",
-                "81": "A1",
-                "eight-one": "A1",
-                "5 2 8 1": "52A1",
-                "five two eight one": "52A1",
-                "52 81": "52A1",
-                "five-two-eight-one": "52A1",
-                "5-2-8-1": "52A1",
-                "52-81": "52A1",
-                "eight two": "A2",
-                "8 2": "A2",
-                "82": "A2",
-                "eight-two": "A2",
-                "5 2 8 2": "52A2",
-                "five two eight two": "52A2",
-                "52 82": "52A2",
-                "five-two-eight-two": "52A2",
-                "5-2-8-2": "52A2",
-                "52-82": "52A2"
-            }
             lower_text = text.lower()
-            for spoken, letter in unit_map.items():
+            for spoken, letter in UNIT_MAPPING.items():
                 if spoken in lower_text:
                     text = re.sub(re.escape(spoken), letter, text, flags=re.IGNORECASE)
                     print(f"   (Mapped unit: {original_text} → {text})")
@@ -298,13 +273,11 @@ def transcriber_worker(model, device):
             # Normalize hyphens in unit IDs (e.g., 5-2-A-1 → 52A1)
             # Targets 52-prefixed units with letters (A,E,L,B,BS,BL) + digits
             def normalize_unit(match):
-                prefix = '52'
                 letter = match.group(1).upper()
                 num = match.group(2)
-                return f"{prefix}{letter}{num}"
+                return f"{UNIT_PREFIX}{letter}{num}"
             
-            unit_pattern = r'\b5-?2-?([A-ELB]|BS|BL)-?(\d+)\b'
-            text = re.sub(unit_pattern, normalize_unit, text, flags=re.IGNORECASE)
+            text = re.sub(UNIT_PATTERN, normalize_unit, text, flags=re.IGNORECASE)
             if text != original_text:  # Only log if changed
                 print(f"   (Normalized units: {original_text} → {text})")
 
@@ -404,7 +377,8 @@ def process_audio():
                 rollover_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     f.write(f"[{rollover_timestamp}] [ROLLOVER] Day ended, continuing in new log\n")
-                LOG_FILE = f"{BASE_LOG_FILENAME}_{current_date}.log"
+                LOG_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{current_date}.log")
+                os.makedirs(OUTPUT_FOLDER, exist_ok=True)
                 if not os.path.exists(LOG_FILE):
                     open(LOG_FILE, 'a').close()
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
