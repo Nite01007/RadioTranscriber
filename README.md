@@ -46,12 +46,13 @@ A real-time transcription tool for public safety radio feeds (e.g., Broadcastify
    pip install numpy scipy torch openai-whisper webrtcvad pyyaml
 
 4. Set up configuration
-    - Open `config.yaml` in any text editor and fill in your values:
+    - Open `config.yaml.example` in any text editor and fill in your values:
         - Broadcastify credentials
         - Feed number and description
         - Whisper model size, prompt, beam/best-of settings
         - VAD aggressiveness, min speech length, silence limit
         - Hallucination block phrases, cutoff phrases, unit mappings, etc.
+    - Save as `config.yaml`
 
 5.  (Recommended) Protect your credentials by adding `config.yaml` to `.gitignore`:
     - Create or edit the `.gitignore` file in your project root
