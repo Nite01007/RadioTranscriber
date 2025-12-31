@@ -1,0 +1,83 @@
+# config.yaml - Configuration for RadioTranscriber
+# Edit values as needed for your feed. Use quotes for strings with special chars.
+
+credentials:
+  username: "your_broadcastify_username"  # Your Broadcastify username
+  password: "your_broadcastify_password"  # Your Broadcastify password
+
+feed_specific:
+  feed_number: 46018                  # Broadcastify feed ID; sane: your specific feed number
+  description: "Belchertown"          # Human-readable name for log files
+  output_folder: "46018_Belchertown/" # Path to save logs; relative or absolute; creates if missing
+
+vad_and_silence:
+  vad_aggressiveness: 3               # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)
+  min_speech_seconds: 2.0             # Min audio length to transcribe; shorter skipped
+  silence_limit: 2.0                  # Seconds of silence to end recording
+
+tuning:
+  model_size: "large-v3"              # Whisper model: tiny/base/small/medium/large/large-v3/turbo
+  language: "en"                      # Language code
+  initial_prompt: >-                  # Prompt to guide transcription; include common terms; last 224 tokens used
+    Transcript of Belchertown MA Station 52 public safety radio. Agencies: Police (Bravo units), Fire, EMS. Units: 52A1 52A2 52E1 52L1 Brush 4 Bravo 6 Bravo 9 Bravo 13 A1 Squad 1. Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. Common phrases: in quarters, on scene, clear, received, responding, central.
+  beam_size: 5                        # Beams in search; higher=accurate but slow
+  best_of: 5                          # Candidates to sample; higher=better
+  no_speech_threshold: 0.75           # Prob threshold to discard non-speech; higher=more strict; sane: 0.6-0.8
+  normalization: 95                   # Percentile for audio normalization; sane: 90-99
+
+post_generation_cleanup:
+  full_block_phrases:                 # Block entire transcript if contains any; common hallucinations
+    - "Transcription by"
+    - "CastingWords"
+    - "ESO"
+    - "Translation by"
+    - "Captions by"
+    - "Rev.com"
+    - "Rev"
+    - "Subtitle"
+    - "Subtitles"
+    - "amara.org"
+    - "amara"
+    - "subtitles by the amara.org community"
+    - "ESA, Inc."
+    - "U.S. Department of"
+    - "Transcripts translated by"
+    - "Transcription Outsourcing"
+    - "Transcription Outsourcing, Inc"
+
+  cutoff_phrases:                     # Truncate after these phrases if found
+    - "We'll be right back"
+    - "We will be right back"
+    - "Thank you for watching"
+    - "Thanks for watching"
+    - "Thank you for your patience"
+    - "Stay tuned"
+    - "Commercial break"
+    - "you're under arrest"
+    - "I'll narrate everything"
+
+  unit_mapping:                       # Map spoken unit phrases to standard IDs
+    "eight one": "A1"
+    "8 1": "A1"
+    "81": "A1"
+    "eight-one": "A1"
+    "5 2 8 1": "52A1"
+    "five two eight one": "52A1"
+    "52 81": "52A1"
+    "five-two-eight-one": "52A1"
+    "5-2-8-1": "52A1"
+    "52-81": "52A1"
+    "eight two": "A2"
+    "8 2": "A2"
+    "82": "A2"
+    "eight-two": "A2"
+    "5 2 8 2": "52A2"
+    "five two eight two": "52A2"
+    "52 82": "52A2"
+    "five-two-eight-two": "52A2"
+    "5-2-8-2": "52A2"
+    "52-82": "52A2"
+
+  unit_normalization:                 # Regex for unit ID cleanup
+    pattern: "\\b5-?2-?([A-ELB]|BS|BL)-?(\\d+)\\b"  # Pattern to match; escape backslashes in code use
+    prefix: "52"                                      # Prefix for normalized units
