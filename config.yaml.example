@@ -81,3 +81,15 @@ post_generation_cleanup:
   unit_normalization:                 # Regex for unit ID cleanup
     pattern: "\\b5-?2-?([A-ELB]|BS|BL)-?(\\d+)\\b"  # Pattern to match; escape backslashes in code use
     prefix: "52"                                      # Prefix for normalized units
+
+mqtt:
+  enabled: true
+  host: 192.168.123.45
+  port: 1883
+  username: mqtt_user
+  password: "mqtt_password"
+  topic_base: "radiotranscriber/belchertown"
+  retain: true
+  recent_max_lines: 25
+  clip_state_chars: 255
+  availability: true
