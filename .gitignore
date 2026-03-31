@@ -1,2 +1,15 @@
-   config.yaml
-   *.log
+# Config with credentials
+config.yaml
+
+# Output directory
+46018_Belchertown/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Backup files
+*.bak
+*.backup

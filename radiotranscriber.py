@@ -16,11 +16,16 @@ import re
 from collections import Counter
 import webrtcvad
 import yaml
+# Optional MQTT publishing (for Home Assistant dashboard)
+try:
+    from mqtt_publisher import MqttPublisher
+except Exception:
+    MqttPublisher = None
+
 
 # Load configuration
 with open("config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
-
 # Extract config values
 USERNAME = config["credentials"]["username"]
 PASSWORD = config["credentials"]["password"]
@@ -45,6 +50,17 @@ CUTOFF_PHRASES = config["post_generation_cleanup"]["cutoff_phrases"]
 UNIT_MAPPING = config["post_generation_cleanup"]["unit_mapping"]
 UNIT_PATTERN = config["post_generation_cleanup"]["unit_normalization"]["pattern"]
 UNIT_PREFIX = config["post_generation_cleanup"]["unit_normalization"]["prefix"]
+
+# --- MQTT (optional) ---
+mqtt_pub = None
+MQTT_CFG = config.get("mqtt", {})
+if MqttPublisher is not None and isinstance(MQTT_CFG, dict) and MQTT_CFG.get("enabled"):
+    try:
+        mqtt_pub = MqttPublisher(MQTT_CFG)
+        print(f"MQTT enabled → publishing to {MQTT_CFG.get('topic_base', '<missing>')}/state")
+    except Exception as e:
+        mqtt_pub = None
+        print(f"MQTT init failed (continuing without MQTT): {e}")
 
 # --- SETTINGS ---
 STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
@@ -299,6 +315,14 @@ def transcriber_worker(model, device):
                     print(f"   (Truncated hallucinated phrase '{phrase}': {original_text})")
                     break
 
+            # Quick & dirty repetition buster (add after all other cleanups)
+            words = text.split()
+            if len(words) > 6:
+                for i in range(len(words)-3):
+                   if words[i:i+3] == words[i+3:i+6]:
+                        text = ' '.join(words[:i+3]) + " [repeated]"
+                        break
+
             # Capitalization for clarity
             keywords = r'(dispatch|central|station 52|baystate|wing|cooley|amr|bravo \d+|engine \d+|ladder \d+|a\d+|e\d+|b\d+|bs\d+|bl\d+)'
             text = re.sub(keywords, lambda m: m.group(0).title(), text, flags=re.I)
@@ -308,6 +332,17 @@ def transcriber_worker(model, device):
                 print(output)
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     f.write(output + "\n")
+                # Publish to MQTT (mirrors what is written to the log)
+                if mqtt_pub:
+                    try:
+                        mqtt_pub.publish_transcript(
+                            feed=FEED_DESCRIPTION,
+                            text=text,
+                            duration_s=duration,
+                            hhmmss=timestamp,
+                        )
+                    except Exception as e:
+                        print(f" (MQTT publish failed: {e})")
             else:
                 print(f"   (Empty after cleanup — discarded)")
 
@@ -441,6 +476,13 @@ def process_audio():
         print(f"[{stop_timestamp}] [STOPPED] Transcription session ended")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{stop_timestamp}] [STOPPED] Transcription session ended\n")
+
+        # Clean MQTT shutdown (will publish offline if availability is enabled)
+        if mqtt_pub:
+            try:
+                mqtt_pub.close()
+            except Exception:
+                pass
         
         ffmpeg_process.kill()
 
