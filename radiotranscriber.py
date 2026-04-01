@@ -1,8 +1,7 @@
 # https://github.com/Nite01007/RadioTranscriber
 import subprocess
 import numpy as np
-import whisper
-import torch
+from faster_whisper import WhisperModel
 import datetime
 import time
 import sys
@@ -41,7 +40,6 @@ MODEL_SIZE = config["tuning"]["model_size"]
 LANGUAGE = config["tuning"]["language"]
 INITIAL_PROMPT = config["tuning"]["initial_prompt"]
 BEAM_SIZE = config["tuning"]["beam_size"]
-BEST_OF = config["tuning"]["best_of"]
 NO_SPEECH_THRESHOLD = config["tuning"]["no_speech_threshold"]
 NORMALIZATION_PERCENTILE = config["tuning"]["normalization"]
 
@@ -87,9 +85,9 @@ VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
 transcription_queue = queue.Queue()
 
 # --- INITIALIZATION ---
-print(f"Loading Whisper model '{MODEL_SIZE}'...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = whisper.load_model(MODEL_SIZE).to(device)
+device = "cpu"
+print(f"Loading Whisper model '{MODEL_SIZE}' (faster-whisper, INT8)...")
+model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
 print(f"Model loaded on {device}")
 
 redacted_url = f"http://{USERNAME}:********@audio.broadcastify.com/{FEED_NUMBER}.mp3"
@@ -98,108 +96,6 @@ print("   Press 'Q' to quit cleanly")
 
 last_activity_time = time.time()
 
-# --- BEGIN: Whisper beam-search debug instrumentation (with fixed tokenizer) ---
-WHISPER_DEBUG = os.getenv("WHISPER_DEBUG", "0") == "1"
-
-if WHISPER_DEBUG:
-    try:
-        from whisper.decoding import BeamSearchDecoder
-
-        _ORIG_UPDATE = BeamSearchDecoder.update
-        _ORIG_FINALIZE = BeamSearchDecoder.finalize
-
-        def _format_tokens(token_list):
-            if len(token_list) <= 12:
-                return token_list
-            return token_list[:3] + ["…"] + token_list[-8:]
-
-        def _decode_tokens(tokenizer, token_list):
-            try:
-                return tokenizer.decode(token_list)
-            except Exception:
-                return "<decode-error>"
-
-        def _get_tokenizer(self):
-            """Robust tokenizer retrieval across Whisper versions."""
-            tokenizer = None
-            if hasattr(self, "inference") and self.inference is not None:
-                tokenizer = getattr(self.inference, "tokenizer", None)
-            if tokenizer is None and hasattr(self, "model"):
-                tokenizer = getattr(self.model, "tokenizer", None)
-            if tokenizer is None:
-                global model
-                tokenizer = getattr(model, "tokenizer", None)
-            return tokenizer
-
-        def _debug_update(self, tokens, logits, sum_logprobs):
-            t0 = time.time()
-            next_tokens, completed = _ORIG_UPDATE(self, tokens, logits, sum_logprobs)
-            dt_ms = int((time.time() - t0) * 1000)
-
-            try:
-                n_total = next_tokens.shape[0]
-                beam_size = self.beam_size
-                n_audio = n_total // beam_size
-
-                tokenizer = _get_tokenizer(self)
-
-                for i in range(n_audio):
-                    print(f"[whisper-debug] audio={i} step_ms={dt_ms} beams={beam_size}")
-                    for j in range(beam_size):
-                        idx = i * beam_size + j
-                        seq = next_tokens[idx].tolist()
-
-                        score = float(sum_logprobs[idx].item() if hasattr(sum_logprobs[idx], "item") else sum_logprobs[idx])
-
-                        decoded = _decode_tokens(tokenizer, seq) if tokenizer else "<no-tokenizer>"
-
-                        print(f"  ├─ beam {j}: score={score:+.3f}")
-                        print(f"      text=\"{decoded}\"")
-                        print(f"      tokens={_format_tokens(seq)}")
-
-                    # Finished sequences
-                    finished_for_audio = (self.finished_sequences or [{}])[i] if self.finished_sequences is not None else {}
-                    if finished_for_audio:
-                        top_finished = sorted(finished_for_audio.items(), key=lambda kv: kv[1], reverse=True)[:min(beam_size, 3)]
-                        print("  └─ finished (top):")
-                        for k, (seq_tuple, s) in enumerate(top_finished):
-                            decoded_fin = _decode_tokens(tokenizer, list(seq_tuple)) if tokenizer else "<no-tokenizer>"
-                            print(f"     [{k}] score={s:+.3f}")
-                            print(f"         text=\"{decoded_fin}\"")
-                            print(f"         tokens={_format_tokens(list(seq_tuple))}")
-
-            except Exception as e:
-                print(f"[whisper-debug] logging error in update: {e}")
-
-            return next_tokens, completed
-
-        def _debug_finalize(self, preceding_tokens, sum_logprobs):
-            try:
-                tokens_groups, scores_groups = _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
-                tokenizer = _get_tokenizer(self)
-
-                for i, (tok_group, score_group) in enumerate(zip(tokens_groups, scores_groups)):
-                    print(f"[whisper-debug] FINAL audio={i} candidates={len(tok_group)}")
-                    pairs = sorted(zip(tok_group, score_group), key=lambda kv: kv[1], reverse=True)
-                    for rank, (seq_tensor, score) in enumerate(pairs[:min(len(pairs), 5)]):
-                        seq = seq_tensor.tolist()
-                        decoded = _decode_tokens(tokenizer, seq) if tokenizer else "<no-tokenizer>"
-                        print(f"  #{rank} score={score:+.3f}")
-                        print(f"     text=\"{decoded}\"")
-                        print(f"     tokens={_format_tokens(seq)}")
-            except Exception as e:
-                print(f"[whisper-debug] logging error in finalize: {e}")
-                return _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
-
-            return _ORIG_FINALIZE(self, preceding_tokens, sum_logprobs)
-
-        BeamSearchDecoder.update = _debug_update
-        BeamSearchDecoder.finalize = _debug_finalize
-
-        print("[whisper-debug] Beam search instrumentation active (WHISPER_DEBUG=1)")
-    except Exception as _e:
-        print(f"[whisper-debug] could not activate instrumentation: {_e}")
-# --- END: Whisper beam-search debug instrumentation ---
 
 def get_ffmpeg_stream(url):
     command = [
@@ -228,28 +124,42 @@ def transcriber_worker(model, device):
             print(f"Transcribing {duration:.1f}s segment...")
             transcribe_start = time.time()
             
-            result = model.transcribe(
+            segments, info = model.transcribe(
                 audio_data,
                 language=LANGUAGE,
-                fp16=(device == "cuda"),
                 initial_prompt=INITIAL_PROMPT,
                 condition_on_previous_text=False,
                 temperature=0.0,
                 beam_size=BEAM_SIZE,
-                best_of=BEST_OF,
                 patience=1.5,
-                suppress_blank=True
+                suppress_blank=True,
+                no_speech_threshold=NO_SPEECH_THRESHOLD
             )
-            
-            text = result['text'].strip()
+            segments = list(segments)  # Force evaluation — generator exhausts on first use
+
+            text = " ".join(s.text for s in segments).strip()
             transcribe_time = time.time() - transcribe_start
             print(f"   Done in {transcribe_time:.1f}s")
 
             original_text = text
 
             # No-speech prob filter
-            if result.get('no_speech_prob', 0) > NO_SPEECH_THRESHOLD:
-                print(f"   (Discarded non-speech segment: prob {result['no_speech_prob']:.2f})")
+            no_speech_prob = max((s.no_speech_prob for s in segments), default=0)
+            if no_speech_prob > NO_SPEECH_THRESHOLD:
+                print(f"   (Discarded non-speech segment: prob {no_speech_prob:.2f})")
+                transcription_queue.task_done()
+                continue
+
+            # Dot-only discard filter (231 confirmed occurrences)
+            if re.fullmatch(r'[.\s]+', text):
+                print(f"   (Discarded dot-only segment: {repr(text)})")
+                transcription_queue.task_done()
+                continue
+
+            # BANG discard filter (106 confirmed occurrences — mic pops / MDT tones)
+            stripped_bang = re.sub(r'[\W_]+', '', text).upper()
+            if stripped_bang and re.fullmatch(r'(BANG)+', stripped_bang):
+                print(f"   (Discarded BANG segment: {repr(text)})")
                 transcription_queue.task_done()
                 continue
 
@@ -279,11 +189,45 @@ def transcriber_worker(model, device):
                     text = common[0][0]
                     print(f"   (De-duplicated repetition: {original_text} → {text})")
 
+            # Repetition cascade filter
+            # Part A: physically impossible speech rate
+            if duration > 0 and len(text.split()) / duration > 8.0:
+                print(f"   (Discarded impossible speech rate: {len(text.split())/duration:.1f} w/s: {text})")
+                transcription_queue.task_done()
+                continue
+
+            # Part B: detect word/phrase repeating 4+ consecutive times
+            words = text.split()
+            cascade_match = None
+            for phrase_len in range(1, 4):
+                for i in range(len(words) - phrase_len * 3):
+                    phrase = words[i:i + phrase_len]
+                    count = 1
+                    j = i + phrase_len
+                    while j + phrase_len <= len(words) and words[j:j + phrase_len] == phrase:
+                        count += 1
+                        j += phrase_len
+                    if count >= 4:
+                        cascade_match = (i, phrase_len, phrase)
+                        break
+                if cascade_match:
+                    break
+            if cascade_match:
+                start_idx, phrase_len, phrase = cascade_match
+                if start_idx >= 4:
+                    text = ' '.join(words[:start_idx + phrase_len])
+                    lower_text = text.lower()
+                    print(f"   (Truncated cascade: {original_text} → {text})")
+                else:
+                    print(f"   (Discarded cascade: {original_text})")
+                    transcription_queue.task_done()
+                    continue
+
             # Map spoken numbers to letter units
             lower_text = text.lower()
             for spoken, letter in UNIT_MAPPING.items():
                 if spoken in lower_text:
-                    text = re.sub(re.escape(spoken), letter, text, flags=re.IGNORECASE)
+                    text = re.sub(r'\b' + re.escape(spoken) + r'\b', letter, text, flags=re.IGNORECASE)
                     print(f"   (Mapped unit: {original_text} → {text})")
 
             # Normalize hyphens in unit IDs (e.g., 5-2-A-1 → 52A1)
