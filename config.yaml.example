@@ -2,26 +2,26 @@
 # Edit values as needed for your feed. Use quotes for strings with special chars.
 
 credentials:
-  username: "your_broadcastify_username"  # Your Broadcastify username
-  password: "your_broadcastify_password"  # Your Broadcastify password
+  username: "username"  # Your Broadcastify username
+  password: "password"  # Your Broadcastify password
 
 feed_specific:
   feed_number: 46018                  # Broadcastify feed ID; sane: your specific feed number
-  description: "Belchertown"          # Human-readable name for log files
-  output_folder: "46018_Belchertown/" # Path to save logs; relative or absolute; creates if missing
+  description: "Belchertown"  # Human-readable name for log files
+  output_folder: "46018_Belchertown/"    # Path to save logs; relative or absolute; creates if missing
 
 vad_and_silence:
-  vad_aggressiveness: 3               # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)
-  min_speech_seconds: 2.0             # Min audio length to transcribe; shorter skipped
-  silence_limit: 2.0                  # Seconds of silence to end recording
+  vad_aggressiveness: 1               # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)
+  min_speech_seconds: 1.5             # Min audio length to transcribe; shorter skipped
+  silence_limit: 3.0                  # Seconds of silence to end recording
 
 tuning:
   model_size: "large-v3"              # Whisper model: tiny/base/small/medium/large/large-v3/turbo
   language: "en"                      # Language code
   initial_prompt: >-                  # Prompt to guide transcription; include common terms; last 224 tokens used
-    Transcript of Belchertown MA Station 52 public safety radio. Agencies: Police (Bravo units), Fire, EMS. Units: 52A1 52A2 52E1 52L1 Brush 4 Bravo 6 Bravo 9 Bravo 13 A1 Squad 1. Locations: Daniel Shays Hwy, Jabez St, Chauncey Walker St, Lord Jeff Apts, Pine Valley, Bondsville, Turkey Hill Rd, North Main St. Hospitals: Baystate Wing, Cooley Dickinson, Baystate Springfield. Common phrases: in quarters, on scene, clear, received, responding, central.
-  beam_size: 5                        # Beams in search; higher=accurate but slow
-  best_of: 5                          # Candidates to sample; higher=better
+    Belchertown MA public safety radio, Station 52. Agencies: Belchertown Police (Bravo units), Belchertown Fire, EMS/A1/A2. Units: 52A1 52A2 52A3 52E1 52L1 52S1 52 Brush 4 Bravo 3 Bravo 4 Bravo 6 Bravo 9 Bravo 11 Bravo 13 Bravo 15. Locations: North Main St, Chauncey Walker St, Pine Valley Plantation, Daniel Shays Hwy, Turkey Hill Rd, Bondsville, Lord Jeff Apts, Amherst Rd, Ware Rd, Franklin St, Barton St, Orchard Rd, Tucker Lane, Clark St, Green St, Pleasant St, Wilson St, Boardman St, Underwood St, Eugene Dr, Nathaniel Way, Old Pelham Rd, Old Enfield Rd, Cold Spring Rd, South Liberty St. Hospitals: Baystate Wing, Cooley Dickinson CDH, Baystate Springfield. Phrases: responding, en route, on scene, in quarters, back quarters, clear, 10-4, received, transporting, refusal obtained. San Jose Highway = Daniel Shays Highway. Short dispatch. Numbers spoken separately.
+  beam_size: 12                        # Beams in search; higher=accurate but slow
+  best_of: 1                          # Unused with faster-whisper (temperature=0.0, no sampling)
   no_speech_threshold: 0.75           # Prob threshold to discard non-speech; higher=more strict; sane: 0.6-0.8
   normalization: 95                   # Percentile for audio normalization; sane: 90-99
 
@@ -30,7 +30,6 @@ post_generation_cleanup:
     - "CastingWords"
     - "ESO"
     - "Rev.com"
-    - "Rev"
     - "amara.org"
     - "amara"
     - "ESA, Inc."
@@ -48,18 +47,20 @@ post_generation_cleanup:
     - "Stay tuned"
     - "Commercial break"
     - "you're under arrest"
-    - "I'll narrate everything"
     - "Transcription by"
     - "Translation by"
     - "Captions by"
     - "Subtitle"
     - "Subtitles"
-
+    - "I'll narrate everything"
+    - "the following is a"
+    - "this is a test"
+    - "end of transmission"
+    - "end of message"
 
   unit_mapping:                       # Map spoken unit phrases to standard IDs
     "eight one": "A1"
     "8 1": "A1"
-    "81": "A1"
     "eight-one": "A1"
     "5 2 8 1": "52A1"
     "five two eight one": "52A1"
@@ -69,7 +70,6 @@ post_generation_cleanup:
     "52-81": "52A1"
     "eight two": "A2"
     "8 2": "A2"
-    "82": "A2"
     "eight-two": "A2"
     "5 2 8 2": "52A2"
     "five two eight two": "52A2"
@@ -77,6 +77,17 @@ post_generation_cleanup:
     "five-two-eight-two": "52A2"
     "5-2-8-2": "52A2"
     "52-82": "52A2"
+    "eight three": "A3"
+    "8 3": "A3"
+    "eight-three": "A3"
+    "5 2 8 3": "52A3"
+    "five two eight three": "52A3"
+    "52 83": "52A3"
+    "five-two-eight-three": "52A3"
+    "5-2-8-3": "52A3"
+    "52-83": "52A3"
+    "5-2-N-J-1": "52E1"
+    "N-J-1": "52E1"
 
   unit_normalization:                 # Regex for unit ID cleanup
     pattern: "\\b5-?2-?([A-ELB]|BS|BL)-?(\\d+)\\b"  # Pattern to match; escape backslashes in code use
