@@ -7,6 +7,8 @@ A real-time transcription tool for public safety radio feeds (e.g., Broadcastify
 
 **Important note**: This script is **heavily tuned** to the patterns of my local public safety radio feed (Belchertown, MA area). Unit IDs, dispatch phrasing, alert tones, and filters are customized for that system. It works well on similar feeds, but you will likely need to tweak the prompt, VAD settings, or cleanup rules in `config.yaml` to match your local radio style.
 
+**Imporant note 2**: Please be aware that while Broadcastify is apparently cool with a premium subscriber who wants to use this tool to capture a few feeds for their own personal projects, if you spin up more than a couple of servers you are likely to run afoul of their acceptable use policy. Please review and comply with the [Broadcastify terms and conditions](https://www.broadcastify.com/terms/).
+
 ## Features
 
 * Live streaming from authenticated Broadcastify feeds
