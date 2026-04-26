@@ -83,6 +83,7 @@ VAD_FRAME_MS = 30
 VAD_FRAME_BYTES = int(SAMPLE_RATE * (VAD_FRAME_MS / 1000) * 2)
 
 transcription_queue = queue.Queue()
+_log_lock = threading.Lock()
 
 # --- INITIALIZATION ---
 device = "cpu"
@@ -274,7 +275,9 @@ def transcriber_worker(model, device):
             if text:
                 output = f"[{timestamp}] ({duration:.1f}s) {text}"
                 print(output)
-                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                with _log_lock:
+                    log_path = LOG_FILE
+                with open(log_path, "a", encoding="utf-8") as f:
                     f.write(output + "\n")
                 # Publish to MQTT (mirrors what is written to the log)
                 if mqtt_pub:
@@ -308,6 +311,7 @@ def process_audio():
     silence_counter = 0
     silence_limit_chunks = int(SILENCE_LIMIT * SAMPLE_RATE * 2 / CHUNK_BYTES)
     chunk_count = 0
+    retry_count = 0
 
     try:
         while True:
@@ -323,17 +327,24 @@ def process_audio():
             else:
                 if ffmpeg_process.poll() is not None:
                     print("ffmpeg process died. Restarting stream...")
+                    time.sleep(min(2 ** retry_count, 60))
                     ffmpeg_process.kill()
+                    ffmpeg_process.wait()
                     ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
+                    retry_count += 1
                 continue
 
             if not raw_bytes:
                 print("Stream lost (EOF). Reconnecting...")
+                time.sleep(min(2 ** retry_count, 60))
                 ffmpeg_process.kill()
+                ffmpeg_process.wait()
                 ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
                 filter_state = np.zeros((sos.shape[0], 2))
+                retry_count += 1
                 continue
 
+            retry_count = 0
             audio_chunk = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
             audio_chunk, filter_state = signal.sosfilt(sos, audio_chunk, zi=filter_state)
@@ -356,14 +367,16 @@ def process_audio():
                 rollover_timestamp = datetime.datetime.now().strftime("%H:%M:%S")
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     f.write(f"[{rollover_timestamp}] [ROLLOVER] Day ended, continuing in new log\n")
-                LOG_FILE = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{current_date}.log")
+                new_log = os.path.join(OUTPUT_FOLDER, f"{BASE_LOG_FILENAME}_{current_date}.log")
                 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-                if not os.path.exists(LOG_FILE):
-                    open(LOG_FILE, 'a').close()
-                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                if not os.path.exists(new_log):
+                    open(new_log, 'a').close()
+                with open(new_log, "a", encoding="utf-8") as f:
                     f.write(f"[{rollover_timestamp}] [STARTED] Transcription session continued - {FEED_DESCRIPTION} feed\n")
-                CURRENT_LOG_DATE = current_date
-                print(f"   [Rollover] Switched to new log: {LOG_FILE}")
+                with _log_lock:
+                    LOG_FILE = new_log
+                    CURRENT_LOG_DATE = current_date
+                print(f"   [Rollover] Switched to new log: {new_log}")
 
             if current_time - last_activity_time > IDLE_THRESHOLD_SECONDS:
                 last_heard = datetime.datetime.fromtimestamp(last_activity_time).strftime("%H:%M:%S")
@@ -429,6 +442,7 @@ def process_audio():
                 pass
         
         ffmpeg_process.kill()
+        ffmpeg_process.wait()
 
 if __name__ == "__main__":
     process_audio()
