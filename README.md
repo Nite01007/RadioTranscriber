@@ -3,7 +3,7 @@
 **My first ever coding project — please be kind!**  
 I'm **not** a programmer (at all). This tool was built entirely by describing what I wanted to generative AIs, iterating on their suggestions, and testing/debugging over many sessions. My AI buddy says it's proof that AI-assisted development can take a complete beginner surprisingly far. Feedback, issues, and pull requests are **very welcome**!
 
-A real-time transcription tool for public safety radio feeds (e.g., Broadcastify streams) using OpenAI Whisper large-v3 via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2 INT8). Designed for long-running, low-maintenance operation with daily log rotation, robust audio processing, and strong hallucination filtering.
+A real-time transcription tool for public safety radio feeds — via Broadcastify streams or an RTL-SDR dongle — using OpenAI Whisper large-v3 via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2 INT8). Designed for long-running, low-maintenance operation with daily log rotation, robust audio processing, and strong hallucination filtering.
 
 **Important note**: This script is **heavily tuned** to the patterns of my local public safety radio feed (Belchertown, MA area). Unit IDs, dispatch phrasing, alert tones, and filters are customized for that system. It works well on similar feeds, but you will likely need to tweak the prompt, VAD settings, or cleanup rules in `config.yaml` to match your local radio style.
 
@@ -11,7 +11,7 @@ A real-time transcription tool for public safety radio feeds (e.g., Broadcastify
 
 ## Features
 
-* Live streaming from authenticated Broadcastify feeds
+* Dual audio source support: authenticated Broadcastify streams **or** RTL-SDR dongle — switch with one line in `config.yaml`
 * High-pass filtering to reduce low-frequency rumble/static
 * Percentile-based normalization to handle squelch pops without crushing quiet speech
 * WebRTC VAD for reliable speech detection in noisy radio environments
@@ -33,8 +33,9 @@ A real-time transcription tool for public safety radio feeds (e.g., Broadcastify
 ## Requirements
 
 * Python 3.8+
-* ffmpeg (must be in your PATH)
-* A Broadcastify premium account (for direct stream access)
+* ffmpeg (must be in your PATH) — required for Broadcastify source
+* rtl_fm / rtl-sdr tools (must be in your PATH) — required for RTL-SDR source
+* A Broadcastify premium account — required for Broadcastify source
 
 ## Installation & Setup
 
@@ -60,8 +61,10 @@ A real-time transcription tool for public safety radio feeds (e.g., Broadcastify
 4. Set up configuration:
 
    * Copy `config.yaml.example` to `config.yaml` and fill in your values:
-     + Broadcastify credentials
-     + Feed number and description
+     + `source:` — set to `broadcastify` or `rtlsdr`
+     + Broadcastify credentials and feed number (under `broadcastify:`) — required if using Broadcastify source
+     + RTL-SDR frequencies, gain, squelch, device index (under `rtlsdr:`) — required if using RTL-SDR source
+     + Feed description and output folder
      + Whisper model size, prompt, beam/patience settings
      + VAD aggressiveness, min speech length, silence limit
      + MQTT broker settings (optional — set `enabled: false` to disable)
@@ -99,8 +102,10 @@ Everything tunable is in one file — no editing the main script needed.
 
 | Section | What You Can Change | Examples / Tips |
 |---|---|---|
-| `credentials` | Broadcastify username/password | Keep secure! Never commit this file |
-| `feed_specific` | Feed number, description, output folder | Output folder auto-created if missing |
+| `source` | Active audio input | `broadcastify` or `rtlsdr` — the only line you need to change to switch sources |
+| `broadcastify` | Broadcastify username, password, feed number | Keep secure! Never commit this file |
+| `rtlsdr` | Frequencies, gain, squelch, device index | Add as many frequencies as you like; `gain: 0` = auto |
+| `feed_specific` | Description, output folder | Output folder auto-created if missing |
 | `vad_and_silence` | VAD aggressiveness, min speech seconds, silence limit | Lower VAD = catches more borderline audio; downstream filters handle noise |
 | `tuning` | Model size, language, initial prompt, beam size, patience, no-speech threshold, normalization | `beam_size: 10-12` recommended; `patience: 2.0` improves accuracy on ambiguous audio |
 | `mqtt` | Broker host/port, topic, credentials, enabled flag | Set `enabled: false` to disable |

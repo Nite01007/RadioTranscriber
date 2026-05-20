@@ -1,14 +1,24 @@
 # config.yaml - Configuration for RadioTranscriber
 # Edit values as needed for your feed. Use quotes for strings with special chars.
 
-credentials:
-  username: "username"  # Your Broadcastify username
-  password: "password"  # Your Broadcastify password
+source: broadcastify                # Audio source: broadcastify or rtlsdr
+
+broadcastify:
+  username: "username"              # Your Broadcastify username
+  password: "password"              # Your Broadcastify password
+  feed_number: 12345                # Broadcastify feed ID
+
+rtlsdr:
+  frequencies:                      # Frequencies to scan (passed as rtl_fm -f args)
+    - 155.37M
+    - 158.82M
+  gain: 40                          # RF gain in dB; 0 = auto
+  squelch: 0                        # Squelch level; 0 = off
+  device_index: 0                   # RTL-SDR device index (0 = first dongle)
 
 feed_specific:
-  feed_number: 46018                  # Broadcastify feed ID; sane: your specific feed number
-  description: "Belchertown"  # Human-readable name for log files
-  output_folder: "46018_Belchertown/"    # Path to save logs; relative or absolute; creates if missing
+  description: "My Feed"            # Human-readable name for log files
+  output_folder: "my_feed/"         # Path to save logs; relative or absolute; creates if missing
 
 vad_and_silence:
   vad_aggressiveness: 1               # VAD sensitivity: 0=least aggressive (more false positives), 3=most (misses quiet speech)

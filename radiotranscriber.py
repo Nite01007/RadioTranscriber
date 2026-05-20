@@ -26,9 +26,14 @@ except Exception:
 with open("config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 # Extract config values
-USERNAME = config["credentials"]["username"]
-PASSWORD = config["credentials"]["password"]
-FEED_NUMBER = config["feed_specific"]["feed_number"]
+SOURCE = config["source"]
+if SOURCE == "broadcastify":
+    USERNAME = config["broadcastify"]["username"]
+    PASSWORD = config["broadcastify"]["password"]
+    FEED_NUMBER = config["broadcastify"]["feed_number"]
+else:
+    USERNAME = PASSWORD = FEED_NUMBER = None
+RTLSDR_CFG = config.get("rtlsdr", {})
 FEED_DESCRIPTION = config["feed_specific"]["description"]
 OUTPUT_FOLDER = config["feed_specific"]["output_folder"]
 
@@ -61,7 +66,8 @@ if MqttPublisher is not None and isinstance(MQTT_CFG, dict) and MQTT_CFG.get("en
         print(f"MQTT init failed (continuing without MQTT): {e}")
 
 # --- SETTINGS ---
-STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
+if SOURCE == "broadcastify":
+    STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
 IDLE_THRESHOLD_SECONDS = 600
@@ -91,8 +97,12 @@ print(f"Loading Whisper model '{MODEL_SIZE}' (faster-whisper, INT8)...")
 model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8", cpu_threads=4)
 print(f"Model loaded on {device}")
 
-redacted_url = f"http://{USERNAME}:********@audio.broadcastify.com/{FEED_NUMBER}.mp3"
-print(f"Streaming {FEED_DESCRIPTION} feed ({FEED_NUMBER}) from: {redacted_url}")
+if SOURCE == "broadcastify":
+    redacted_url = f"http://{USERNAME}:********@audio.broadcastify.com/{FEED_NUMBER}.mp3"
+    print(f"Streaming {FEED_DESCRIPTION} via Broadcastify feed {FEED_NUMBER}: {redacted_url}")
+else:
+    freqs = ", ".join(str(f) for f in RTLSDR_CFG["frequencies"])
+    print(f"Streaming {FEED_DESCRIPTION} via RTL-SDR (device {RTLSDR_CFG['device_index']}) on {freqs}")
 print("   Press 'Q' to quit cleanly")
 
 last_activity_time = time.time()
@@ -111,6 +121,30 @@ def get_ffmpeg_stream(url):
         '-'
     ]
     return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+def get_rtlsdr_stream(frequencies, gain, squelch, device_index):
+    freq_args = []
+    for f in frequencies:
+        freq_args += ['-f', str(f)]
+    command = [
+        'rtl_fm',
+        '-d', str(device_index),
+        *freq_args,
+        '-M', 'fm', '-s', '200k', '-r', str(SAMPLE_RATE),
+        '-l', str(squelch), '-g', str(gain),
+        '-'
+    ]
+    return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+def _open_stream():
+    if SOURCE == "broadcastify":
+        return get_ffmpeg_stream(STREAM_URL)
+    return get_rtlsdr_stream(
+        RTLSDR_CFG["frequencies"],
+        RTLSDR_CFG["gain"],
+        RTLSDR_CFG["squelch"],
+        RTLSDR_CFG["device_index"],
+    )
 
 def transcriber_worker(model, device):
     print(f"   [Worker] Transcriber thread started on {device}")
@@ -300,8 +334,8 @@ def transcriber_worker(model, device):
 
 def process_audio():
     global last_activity_time, LOG_FILE, CURRENT_LOG_DATE, filter_state
-    ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
-    
+    ffmpeg_process = _open_stream()
+
     worker = threading.Thread(target=transcriber_worker, args=(model, device))
     worker.daemon = True
     worker.start()
@@ -326,11 +360,11 @@ def process_audio():
                 raw_bytes = ffmpeg_process.stdout.read(CHUNK_BYTES)
             else:
                 if ffmpeg_process.poll() is not None:
-                    print("ffmpeg process died. Restarting stream...")
+                    print("Stream process died. Restarting...")
                     time.sleep(min(2 ** retry_count, 60))
                     ffmpeg_process.kill()
                     ffmpeg_process.wait()
-                    ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
+                    ffmpeg_process = _open_stream()
                     retry_count += 1
                 continue
 
@@ -339,7 +373,7 @@ def process_audio():
                 time.sleep(min(2 ** retry_count, 60))
                 ffmpeg_process.kill()
                 ffmpeg_process.wait()
-                ffmpeg_process = get_ffmpeg_stream(STREAM_URL)
+                ffmpeg_process = _open_stream()
                 filter_state = np.zeros((sos.shape[0], 2))
                 retry_count += 1
                 continue
