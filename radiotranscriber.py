@@ -535,6 +535,7 @@ def process_audio():
     chunk_count = 0
     retry_count = 0
     pending_squelch = None
+    recording_start_time = None
 
     try:
         while True:
@@ -577,6 +578,7 @@ def process_audio():
                 # Synthesize silence so the VAD can accumulate silence frames and finalize
                 # any open recording instead of stalling indefinitely.
                 raw_bytes = bytes(CHUNK_BYTES)
+                filter_state = np.zeros((sos.shape[0], 2))
 
             if not raw_bytes:
                 print("Stream lost (EOF). Reconnecting...")
@@ -632,10 +634,34 @@ def process_audio():
                 print(f"   [Idle >10 min] Last heard at {last_heard}")
                 last_activity_time = current_time
 
+            # Safety net: force-finalize if recording has been open implausibly long.
+            # Prevents indefinite stall when post-transmission noise keeps the VAD active.
+            if is_recording and current_time - recording_start_time > 45:
+                print(f"   [Timeout] Recording open >45s — force-finalizing")
+                full_audio = np.concatenate(audio_buffer)
+                if len(full_audio) > 0:
+                    percentile_val = np.percentile(np.abs(full_audio), NORMALIZATION_PERCENTILE)
+                    if percentile_val > 0:
+                        full_audio = full_audio / percentile_val
+                        full_audio = np.clip(full_audio, -1.0, 1.0)
+                full_audio = full_audio.astype(np.float32)
+                duration = len(full_audio) / SAMPLE_RATE
+                if duration >= MIN_SPEECH_SECONDS:
+                    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                    transcription_queue.put((timestamp, full_audio.copy()))
+                    print(f"   Queued {duration:.1f}s segment for transcription")
+                else:
+                    print(f"   (Skipping short burst: {duration:.1f}s)")
+                audio_buffer = []
+                is_recording = False
+                silence_counter = 0
+                recording_start_time = None
+
             if is_speech:
                 if not is_recording:
                     print("Voice started...")
                     is_recording = True
+                    recording_start_time = current_time
                 audio_buffer.append(audio_chunk)
                 silence_counter = 0
                 last_activity_time = current_time
@@ -646,27 +672,28 @@ def process_audio():
 
                     if silence_counter >= silence_limit_chunks:
                         full_audio = np.concatenate(audio_buffer)
-                        
+
                         if len(full_audio) > 0:
                             percentile_val = np.percentile(np.abs(full_audio), NORMALIZATION_PERCENTILE)
                             if percentile_val > 0:
                                 full_audio = full_audio / percentile_val
                                 full_audio = np.clip(full_audio, -1.0, 1.0)
-                        
+
                         full_audio = full_audio.astype(np.float32)
 
                         duration = len(full_audio) / SAMPLE_RATE
-                        
+
                         if duration >= MIN_SPEECH_SECONDS:
                             timestamp = datetime.datetime.now().strftime("%H:%M:%S")
                             transcription_queue.put((timestamp, full_audio.copy()))
                             print(f"   Queued {duration:.1f}s segment for transcription")
                         else:
                             print(f"   (Skipping short burst: {duration:.1f}s)")
-                        
+
                         audio_buffer = []
                         is_recording = False
                         silence_counter = 0
+                        recording_start_time = None
 
             chunk_count += 1
             if chunk_count % GC_INTERVAL == 0:
