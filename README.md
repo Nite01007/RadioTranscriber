@@ -12,6 +12,8 @@ A real-time transcription tool for public safety radio feeds — via Broadcastif
 ## Features
 
 * Dual audio source support: authenticated Broadcastify streams **or** RTL-SDR dongle — switch with one line in `config.yaml`
+* **Live HTTP audio stream** (RTL-SDR only): optional MP3 stream served on a configurable port — connect VLC or a browser to monitor the raw feed in real time while transcription runs unaffected
+* **Runtime squelch control** (RTL-SDR only): press `+`/`-` while running to raise or lower the squelch threshold; rtl_fm restarts immediately and the new value is saved to `config.yaml`
 * High-pass filtering to reduce low-frequency rumble/static
 * Percentile-based normalization to handle squelch pops without crushing quiet speech
 * WebRTC VAD for reliable speech detection in noisy radio environments
@@ -96,6 +98,22 @@ Example log entry:
 
 When enabled, the transcriber publishes each transcript line to an MQTT topic for use with home automation platforms (Home Assistant, Node-RED, etc.). Configure broker, port, topic, and credentials in the `mqtt` section of `config.yaml`. Set `enabled: false` to disable entirely with no performance impact.
 
+## Live Audio Stream (RTL-SDR only)
+
+Uncomment `stream_port` under the `rtlsdr:` block in `config.yaml` to enable an MP3 stream that any browser or VLC can connect to while transcription runs unaffected:
+
+```yaml
+rtlsdr:
+  # stream_port: 8911
+```
+
+Then connect with:
+```
+http://<your-host>:8911/
+```
+
+The stream is continuous — silence is sent between transmissions so clients don't drop. Multiple simultaneous listeners are supported. Join and leave events are logged to the console with a live listener count. If you're behind a firewall, open the port: `sudo firewall-cmd --permanent --add-port=8911/tcp && sudo firewall-cmd --reload`
+
 ## Customization (All in config.yaml)
 
 Everything tunable is in one file — no editing the main script needed.
@@ -104,7 +122,7 @@ Everything tunable is in one file — no editing the main script needed.
 |---|---|---|
 | `source` | Active audio input | `broadcastify` or `rtlsdr` — the only line you need to change to switch sources |
 | `broadcastify` | Broadcastify username, password, feed number | Keep secure! Never commit this file |
-| `rtlsdr` | Frequencies, gain, squelch, device index | Add as many frequencies as you like; `gain: 0` = auto |
+| `rtlsdr` | Frequencies, gain, squelch, device index, stream_port | Add as many frequencies as you like; `gain: 0` = auto; squelch **required** for scanning mode (try 30–50); uncomment `stream_port` to enable live audio stream |
 | `feed_specific` | Description, output folder | Output folder auto-created if missing |
 | `vad_and_silence` | VAD aggressiveness, min speech seconds, silence limit | Lower VAD = catches more borderline audio; downstream filters handle noise |
 | `tuning` | Model size, language, initial prompt, beam size, patience, no-speech threshold, normalization | `beam_size: 10-12` recommended; `patience: 2.0` improves accuracy on ambiguous audio |

@@ -15,6 +15,8 @@ import re
 from collections import Counter
 import webrtcvad
 import yaml
+import http.server
+import socketserver
 # Optional MQTT publishing (for Home Assistant dashboard)
 try:
     from mqtt_publisher import MqttPublisher
@@ -70,6 +72,7 @@ if SOURCE == "broadcastify":
     STREAM_URL = f"http://{USERNAME}:{PASSWORD}@audio.broadcastify.com/{FEED_NUMBER}.mp3"
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
+STREAM_PORT = int(RTLSDR_CFG["stream_port"]) if SOURCE == "rtlsdr" and "stream_port" in RTLSDR_CFG else None
 IDLE_THRESHOLD_SECONDS = 600
 GC_INTERVAL = 100
 
@@ -103,7 +106,10 @@ if SOURCE == "broadcastify":
 else:
     freqs = ", ".join(str(f) for f in RTLSDR_CFG["frequencies"])
     print(f"Streaming {FEED_DESCRIPTION} via RTL-SDR (device {RTLSDR_CFG['device_index']}) on {freqs}")
-print("   Press 'Q' to quit cleanly")
+if SOURCE == "rtlsdr":
+    print(f"   Press 'Q' to quit, '+'/'-' to raise/lower squelch (currently {RTLSDR_CFG['squelch']})")
+else:
+    print("   Press 'Q' to quit cleanly")
 
 last_activity_time = time.time()
 
@@ -145,6 +151,180 @@ def _open_stream():
         RTLSDR_CFG["squelch"],
         RTLSDR_CFG["device_index"],
     )
+
+def _write_squelch_to_config(value):
+    try:
+        with open("config.yaml", "r") as f:
+            content = f.read()
+        content = re.sub(
+            r'^(\s*squelch:\s*)\d+',
+            lambda m: m.group(1) + str(value),
+            content,
+            flags=re.MULTILINE,
+        )
+        with open("config.yaml", "w") as f:
+            f.write(content)
+    except Exception as e:
+        print(f"   (Could not save squelch to config.yaml: {e})")
+
+
+# --- HTTP audio streaming (rtlsdr only, when stream_port is configured) ---
+_http_pcm_queue = queue.Queue(maxsize=50)
+_stream_clients = []
+_stream_clients_lock = threading.Lock()
+_current_encoder = None
+_current_encoder_lock = threading.Lock()
+
+
+def _start_http_encoder():
+    return subprocess.Popen(
+        ['/usr/bin/ffmpeg',
+         '-fflags', '+nobuffer',
+         '-f', 's16le', '-ar', str(SAMPLE_RATE), '-ac', '1', '-i', 'pipe:0',
+         '-f', 'mp3', '-b:a', '32k', '-flush_packets', '1',
+         '-loglevel', 'quiet', 'pipe:1'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=0,  # unbuffered stdin — writes go straight to the OS pipe
+    )
+
+
+def _http_encoder_feeder(proc, stop_event):
+    FEED_BYTES = 512                          # ~16ms per write at 16000 Hz s16le mono
+    feed_sec = FEED_BYTES / (SAMPLE_RATE * 2)
+    silence = bytes(FEED_BYTES)
+    buf = bytearray()
+    next_feed = time.monotonic()
+
+    while not stop_event.is_set():
+        # Greedily drain all available PCM into the local buffer
+        while True:
+            try:
+                chunk = _http_pcm_queue.get_nowait()
+                if chunk is None:
+                    return
+                buf.extend(chunk)
+            except queue.Empty:
+                break
+
+        # Sleep until the next scheduled write, keeping pace with real-time audio
+        now = time.monotonic()
+        if now < next_feed:
+            time.sleep(next_feed - now)
+        next_feed += feed_sec
+        # If we fall badly behind (e.g. after a stall), reset rather than burst to catch up
+        if next_feed < time.monotonic() - 0.5:
+            next_feed = time.monotonic()
+
+        # Write one 16ms piece; silence-fill when no real audio is queued
+        if len(buf) >= FEED_BYTES:
+            piece = bytes(buf[:FEED_BYTES])
+            del buf[:FEED_BYTES]
+        else:
+            piece = silence
+
+        try:
+            proc.stdin.write(piece)
+        except (OSError, BrokenPipeError):
+            break
+
+    try:
+        proc.stdin.close()
+    except OSError:
+        pass
+
+
+def _http_encoder_reader(proc, stop_event):
+    while not stop_event.is_set():
+        try:
+            data = proc.stdout.read(4096)
+        except OSError:
+            break
+        if not data:
+            break
+        with _stream_clients_lock:
+            stale = []
+            for client_q in _stream_clients:
+                try:
+                    client_q.put_nowait(data)
+                except queue.Full:
+                    stale.append(client_q)
+            for client_q in stale:
+                _stream_clients.remove(client_q)
+
+
+class _StreamHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'audio/mpeg')
+        self.send_header('Cache-Control', 'no-cache, no-store')
+        self.end_headers()
+        client_q = queue.Queue(maxsize=100)
+        with _stream_clients_lock:
+            _stream_clients.append(client_q)
+            count = len(_stream_clients)
+        print(f"   [Stream] Listener joined from {self.client_address[0]} — {count} listening")
+        try:
+            while True:
+                try:
+                    data = client_q.get(timeout=5.0)
+                except queue.Empty:
+                    continue
+                if data is None:
+                    break
+                self.wfile.write(data)
+                self.wfile.flush()
+        except (OSError, BrokenPipeError):
+            pass
+        finally:
+            with _stream_clients_lock:
+                if client_q in _stream_clients:
+                    _stream_clients.remove(client_q)
+                count = len(_stream_clients)
+            print(f"   [Stream] Listener left from {self.client_address[0]} — {count} listening")
+
+    def log_message(self, *args):
+        pass
+
+
+def _http_monitor(port, stop_event):
+    global _current_encoder
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    server = socketserver.ThreadingTCPServer(('', port), _StreamHandler)
+    server.daemon_threads = True
+    svr_t = threading.Thread(target=server.serve_forever, daemon=True)
+    svr_t.start()
+    print(f"   [Stream] HTTP audio stream on :{port} — connect with http://<host>:{port}/")
+    while not stop_event.is_set():
+        while True:
+            try:
+                _http_pcm_queue.get_nowait()
+            except queue.Empty:
+                break
+        proc = _start_http_encoder()
+        with _current_encoder_lock:
+            _current_encoder = proc
+        feeder_t = threading.Thread(target=_http_encoder_feeder, args=(proc, stop_event), daemon=True)
+        reader_t = threading.Thread(target=_http_encoder_reader, args=(proc, stop_event), daemon=True)
+        feeder_t.start()
+        reader_t.start()
+        feeder_t.join()
+        reader_t.join()
+        proc.wait()
+        with _current_encoder_lock:
+            _current_encoder = None
+        if not stop_event.is_set():
+            print("   [Stream] Encoder restarting...")
+            time.sleep(1)
+    with _stream_clients_lock:
+        for cq in _stream_clients:
+            try:
+                cq.put_nowait(None)
+            except queue.Full:
+                pass
+    server.shutdown()
+
 
 def transcriber_worker(model, device):
     print(f"   [Worker] Transcriber thread started on {device}")
@@ -336,6 +516,14 @@ def process_audio():
     global last_activity_time, LOG_FILE, CURRENT_LOG_DATE, filter_state
     ffmpeg_process = _open_stream()
 
+    if STREAM_PORT:
+        _http_stop = threading.Event()
+        http_monitor_t = threading.Thread(target=_http_monitor, args=(STREAM_PORT, _http_stop), daemon=True)
+        http_monitor_t.start()
+    else:
+        _http_stop = None
+        http_monitor_t = None
+
     worker = threading.Thread(target=transcriber_worker, args=(model, device))
     worker.daemon = True
     worker.start()
@@ -346,6 +534,7 @@ def process_audio():
     silence_limit_chunks = int(SILENCE_LIMIT * SAMPLE_RATE * 2 / CHUNK_BYTES)
     chunk_count = 0
     retry_count = 0
+    pending_squelch = None
 
     try:
         while True:
@@ -354,8 +543,25 @@ def process_audio():
                 if key == 'q':
                     print("\nQuit requested — cleaning up...")
                     raise KeyboardInterrupt
+                elif SOURCE == "rtlsdr" and key in ('+', '='):
+                    pending_squelch = min(RTLSDR_CFG["squelch"] + 5, 100)
+                    print(f"   [Squelch] {RTLSDR_CFG['squelch']} → {pending_squelch}")
+                elif SOURCE == "rtlsdr" and key == '-':
+                    pending_squelch = max(RTLSDR_CFG["squelch"] - 5, 0)
+                    print(f"   [Squelch] {RTLSDR_CFG['squelch']} → {pending_squelch}")
 
-            ready, _, _ = select.select([ffmpeg_process.stdout], [], [], 0.5)
+            if pending_squelch is not None:
+                RTLSDR_CFG["squelch"] = pending_squelch
+                _write_squelch_to_config(pending_squelch)
+                pending_squelch = None
+                ffmpeg_process.kill()
+                ffmpeg_process.wait()
+                ffmpeg_process = _open_stream()
+                filter_state = np.zeros((sos.shape[0], 2))
+                retry_count = 0
+                continue
+
+            ready, _, _ = select.select([ffmpeg_process.stdout], [], [], CHUNK_BYTES / (SAMPLE_RATE * 2))
             if ready:
                 raw_bytes = ffmpeg_process.stdout.read(CHUNK_BYTES)
             else:
@@ -366,7 +572,11 @@ def process_audio():
                     ffmpeg_process.wait()
                     ffmpeg_process = _open_stream()
                     retry_count += 1
-                continue
+                    continue
+                # rtl_fm is alive but not writing — squelch is closed between transmissions.
+                # Synthesize silence so the VAD can accumulate silence frames and finalize
+                # any open recording instead of stalling indefinitely.
+                raw_bytes = bytes(CHUNK_BYTES)
 
             if not raw_bytes:
                 print("Stream lost (EOF). Reconnecting...")
@@ -379,6 +589,11 @@ def process_audio():
                 continue
 
             retry_count = 0
+            if STREAM_PORT:
+                try:
+                    _http_pcm_queue.put_nowait(raw_bytes)
+                except queue.Full:
+                    pass
             audio_chunk = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
             audio_chunk, filter_state = signal.sosfilt(sos, audio_chunk, zi=filter_state)
@@ -475,6 +690,23 @@ def process_audio():
             except Exception:
                 pass
         
+        if STREAM_PORT and _http_stop:
+            _http_stop.set()
+            try:
+                _http_pcm_queue.put_nowait(None)
+            except queue.Full:
+                pass
+            with _current_encoder_lock:
+                enc = _current_encoder
+            if enc:
+                try:
+                    enc.kill()
+                    enc.wait()
+                except Exception:
+                    pass
+            if http_monitor_t:
+                http_monitor_t.join(timeout=5)
+
         ffmpeg_process.kill()
         ffmpeg_process.wait()
 

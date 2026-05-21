@@ -13,8 +13,9 @@ rtlsdr:
     - 155.37M
     - 158.82M
   gain: 40                          # RF gain in dB; 0 = auto
-  squelch: 0                        # Squelch level; 0 = off
+  squelch: 40                       # Squelch level; required for scanning mode to hop frequencies (try 30-50); 0 = off
   device_index: 0                   # RTL-SDR device index (0 = first dongle)
+  # stream_port: 8911               # Uncomment to enable live HTTP audio stream on this port
 
 feed_specific:
   description: "My Feed"            # Human-readable name for log files
